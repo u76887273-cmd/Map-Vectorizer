@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no,viewport-fit=cover">
+<meta name="theme-color" content="#111827">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Map Vectorizer">
+<link rel="manifest" href="manifest.webmanifest">
+<title>Map Vectorizer V5</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#111827;color:#f9fafb;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
+header{height:52px;display:flex;align-items:center;padding:0 10px;background:#0b1220;gap:8px}
+header b{font-size:16px;white-space:nowrap}
+#toolbar{position:fixed;z-index:5;top:52px;left:0;right:0;background:#182234;padding:7px;display:flex;gap:6px;overflow-x:auto;-webkit-overflow-scrolling:touch}
+button,select,input{font:inherit;border:1px solid #4b5563;border-radius:9px;background:#253247;color:#fff;padding:8px 10px}
+button{white-space:nowrap}
+button.active{background:#2563eb;border-color:#60a5fa}
+button.danger{background:#7f1d1d}
+button:disabled{opacity:.45}
+input[type=number],input[type=text]{width:100px}
+#stage{position:absolute;left:0;right:0;top:102px;bottom:0;overflow:hidden;background:#030712;touch-action:none}
+canvas{position:absolute;left:0;top:0;transform-origin:0 0}
+#info{position:fixed;z-index:8;left:8px;right:8px;bottom:8px;background:rgba(17,24,39,.9);border:1px solid #374151;border-radius:10px;padding:8px;font-size:12px}
+.panel{position:fixed;z-index:10;left:8px;right:8px;top:112px;background:#111827;border:1px solid #4b5563;border-radius:12px;padding:12px;display:none;max-height:70vh;overflow:auto}
+.panel h3{margin:0 0 10px}
+.row{display:flex;gap:8px;align-items:center;margin:7px 0;flex-wrap:wrap}
+.row label{font-size:13px}
+.small{font-size:11px;color:#cbd5e1}
+#file{display:none}
+</style>
+</head>
+<body>
+<header><b>Map Vectorizer</b><span id="status" class="small">No map loaded</span></header>
+<div id="installBar" style="display:none;position:fixed;z-index:20;top:58px;right:8px;background:#1e293b;border:1px solid #64748b;border-radius:10px;padding:8px">
+<button id="installBtn">Install App</button>
+</div>
+
+<div id="toolbar">
+<label><button onclick="file.click()">Load Map</button></label>
+<button id="pickBtn">Pick Color</button>
+<button id="traceBtn">Trace From Tap</button>
+<button id="allBtn">Trace All</button>
+<button id="selectBtn" class="active">Select</button>
+<button id="drawBtn">Draw</button><button id="editBtn">Edit Vertices</button>
+<button id="splitBtn">Split</button>
+<button id="multiBtn">Multi-select</button><button id="joinBtn">Join</button>
+<button id="deleteBtn" class="danger">Delete</button>
+<button id="undoBtn">Undo</button>
+<button id="clearBtn">Clear</button>
+<button id="geoBtn">Georeference</button>
+<button id="exportBtn">Export Shapefile</button>
+<button id="projectBtn">Save Project</button><button id="loadProjectBtn">Load Project</button>
+<input id="file" type="file" accept="image/*"><input id="projectFile" type="file" accept=".json,application/json" style="display:none">
+</div>
+
+<div id="stage">
+<canvas id="map"></canvas>
+<canvas id="vec"></canvas>
+</div>
+
+<div id="info">Load a map image. Pick a line color, then Trace From Tap.</div>
+<div id="traceSettings" class="panel" style="display:block;top:auto;bottom:48px;left:8px;right:auto;width:min(360px,calc(100% - 16px));max-height:none">
+<div class="row"><label>Color tolerance</label><input id="tolRange" type="range" min="10" max="110" value="45"><span id="tolVal">45</span></div>
+<div class="row"><label>Minimum component</label><input id="minRange" type="range" min="5" max="500" value="35"><span id="minVal">35</span></div>
+<div class="row"><label>Line continuity</label><input id="contRange" type="range" min="1" max="20" value="6"><span id="contVal">6</span></div>
+</div>
+
+<div id="geoPanel" class="panel">
+<h3>Optional Georeferencing</h3>
+<div class="small">Add at least 3 non-collinear control points. Tap a known point on the map, then enter its real X/Y coordinates.</div>
+<div id="cpList"></div>
+<div class="row"><button id="addCp">Add Control Point</button><button id="clearCp">Clear Points</button></div>
+<div class="row"><label>CRS:</label><select id="crs"><option value="4326">EPSG:4326 — WGS 84</option><option value="3857">EPSG:3857 — Web Mercator</option><option value="utm_auto">WGS 84 / UTM</option><option value="custom">Custom ESRI WKT</option></select></div>
+<div class="row" id="utmRow" style="display:none"><label>UTM zone:</label><input id="utmZone" type="number" min="1" max="60" value="36"><label>Hemisphere:</label><select id="utmHem"><option>N</option><option>S</option></select></div>
+<div class="row" id="customRow" style="display:none"><textarea id="customWkt" style="width:100%;min-height:90px;background:#253247;color:#fff;border:1px solid #4b5563;border-radius:9px;padding:8px" placeholder="Paste ESRI WKT here"></textarea></div>
+<div class="row"><button id="closeGeo">Close</button></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/shp-write@0.3.2/shpwrite.js"></script>
+<script>
+const file=document.getElementById('file'), stage=document.getElementById('stage');
+const map=document.getElementById('map'), vec=document.getElementById('vec');
+const mc=map.getContext('2d'), vc=vec.getContext('2d');
+const statusEl=document.getElementById('status'), info=document.getElementById('info');
+
+let img=null, W=0,H=0;
+let lines=[], history=[], selected=new Set(), mode='select';
+let picked=null, tol=45, minSize=35, continuity=6;
+let scale=1, ox=0, oy=0, dragging=false, lastX=0,lastY=0;
+let drawPts=[], splitLine=-1, cps=[], geoMode=false, multiSelect=false, editMode=false, editVertex=-1, traceVisited=new Set();
+
+function msg(s){info.textContent=s}
+function setMode(m){
+ mode=m; drawPts=[]; splitLine=-1;
+ document.querySelectorAll('#toolbar button').forEach(b=>b.classList.remove('active'));
+ const mapm={select:'selectBtn',draw:'drawBtn',split:'splitBtn'};
+ if(mapm[m])document.getElementById(mapm[m]).classList.add('active');
+ msg(m==='draw'?'Tap points; press Draw again to finish.':m==='split'?'Select a line, then tap where it should split.':m==='select'?'Tap a line to select it.':m);
+}
+function snap(){history.push(lines.map(x=>x.map(p=>[p[0],p[1]])));if(history.length>40)history.shift()}
+function resizeCanvases(){
+ map.width=vec.width=W; map.height=vec.height=H;
+ map.style.width=vec.style.width=W+'px'; map.style.height=vec.style.height=H+'px';
+ redraw();
+}
+function redraw(){
+ mc.clearRect(0,0,W,H); vc.clearRect(0,0,W,H);
+ if(img)mc.drawImage(img,0,0);
+ vc.lineWidth=2/scale;
+ lines.forEach((ln,i)=>{
+   if(ln.length<2)return;
+   vc.beginPath();vc.moveTo(ln[0][0],ln[0][1]);
+   for(let j=1;j<ln.length;j++)vc.lineTo(ln[j][0],ln[j][1]);
+   vc.strokeStyle=selected.has(i)?'#00ffff':'#ff2020';vc.stroke();
+   if(selected.has(i)){
+     vc.fillStyle='#00ffff';
+     for(const p of ln){vc.beginPath();vc.arc(p[0],p[1],3/scale,0,Math.PI*2);vc.fill()}
+   }
+ });
+ if(drawPts.length){
+   vc.strokeStyle='#ffff00';vc.lineWidth=3/scale;vc.beginPath();
+   vc.moveTo(drawPts[0][0],drawPts[0][1]);
+   drawPts.slice(1).forEach(p=>vc.lineTo(p[0],p[1]));vc.stroke();
+ }
+ applyTransform();
+ statusEl.textContent=img?`${lines.length} lines • ${cps.length} control points`:'No map loaded';
+}
+function applyTransform(){
+ [map,vec].forEach(c=>{c.style.transform=`translate(${ox}px,${oy}px) scale(${scale})`});
+}
+function screenToImage(clientX,clientY){
+ const r=stage.getBoundingClientRect();
+ return [(clientX-r.left-ox)/scale,(clientY-r.top-oy)/scale];
+}
+function fit(){
+ if(!img)return;
+ const sw=stage.clientWidth,sh=stage.clientHeight;
+ scale=Math.min(sw/W,sh/H)*.98;ox=(sw-W*scale)/2;oy=(sh-H*scale)/2;redraw();
+}
+file.onchange=e=>{
+ const f=e.target.files[0];if(!f)return;
+ const u=URL.createObjectURL(f), im=new Image();
+ im.onload=()=>{img=im;W=im.naturalWidth;H=im.naturalHeight;
+   const max=5000, s=Math.min(1,max/Math.max(W,H));
+   if(s<1){W=Math.round(W*s);H=Math.round(H*s);}
+   map.width=vec.width=W;map.height=vec.height=H;
+   mc.drawImage(im,0,0,W,H);lines=[];history=[];selected.clear();cps=[];fit();
+   msg('Map loaded. Pick a line color, then use Trace From Tap for one connected line.');
+ };
+ im.src=u;
+};
+
+
+function localColorScore(x,y,target){
+ const r=Math.max(0,Math.min(W-1,Math.round(x))), c=Math.max(0,Math.min(H-1,Math.round(y)));
+ const d=mc.getImageData(r,c,1,1).data;
+ return Math.hypot(d[0]-target[0],d[1]-target[1],d[2]-target[2]);
+}
+function localWidth(m,x,y){
+ // Estimate local line thickness from a small cross neighborhood.
+ let n=0;
+ for(let dy=-4;dy<=4;dy++)for(let dx=-4;dx<=4;dx++){
+   const xx=Math.round(x)+dx,yy=Math.round(y)+dy;
+   if(xx>=0&&yy>=0&&xx<W&&yy<H&&m[yy*W+xx])n++;
+ }
+ return Math.sqrt(n);
+}
+function segmentContinuity(m,a,b){
+ const len=Math.hypot(b[0]-a[0],b[1]-a[1])||1;
+ const steps=Math.max(4,Math.ceil(len/continuity));
+ let good=0;
+ for(let i=0;i<=steps;i++){
+   const t=i/steps,x=Math.round(a[0]+(b[0]-a[0])*t),y=Math.round(a[1]+(b[1]-a[1])*t);
+   if(x>=0&&y>=0&&x<W&&y<H&&m[y*W+x])good++;
+ }
+ return good/(steps+1);
+}
+function filterSegments(segs,m){
+ if(!segs.length)return [];
+ const widths=segs.map(l=>l.reduce((s,p,i)=>i?s+localWidth(m,p[0],p[1]):s,0)/Math.max(1,l.length-1));
+ const med=[...widths].sort((a,b)=>a-b)[Math.floor(widths.length/2)]||1;
+ return segs.filter((l,i)=>{
+   if(l.length<3)return false;
+   if(l.length>2){
+     const step=Math.max(1,Math.floor(l.length/12));
+     let sum=0,n=0;
+     for(let j=step;j<l.length;j+=step){sum+=segmentContinuity(m,l[j-step],l[j]);n++}
+     if(n&&sum/n<0.55)return false;
+   }
+   // Reject tiny, unusually thin fragments while retaining genuine thin roads.
+   if(widths[i]<Math.max(0.65,med*0.25) && l.length<12)return false;
+   return true;
+ });
+}
+function nearestVertex(p){
+ let bi=-1,bv=-1,bd=Infinity;
+ lines.forEach((ln,i)=>ln.forEach((q,j)=>{
+   const d=Math.hypot(p[0]-q[0],p[1]-q[1]);
+   if(d<bd){bd=d;bi=i;bv=j}
+ }));
+ return {i:bi,v:bv,d:bd};
+}
+function pixel(x,y){const d=mc.getImageData(Math.max(0,Math.min(W-1,x)),Math.max(0,Math.min(H-1,y)),1,1).data;return[d[0],d[1],d[2]]}
+function dist(a,b){return Math.hypot(a[0]-b[0],a[1]-b[1],a[2]-b[2])}
+function maskAround(seed,local=true){
+ const data=mc.getImageData(0,0,W,H).data, m=new Uint8Array(W*H);
+ const q=[], seen=new Uint8Array(W*H);
+ const sx=Math.round(seed[0]),sy=Math.round(seed[1]);
+ if(sx<0||sy<0||sx>=W||sy>=H)return m;
+ const target=pixel(sx,sy), maxTol=tol;
+ function ok(x,y){
+   const i=(y*W+x)*4;
+   return Math.hypot(data[i]-target[0],data[i+1]-target[1],data[i+2]-target[2])<=maxTol;
+ }
+ q.push([sx,sy]);seen[sy*W+sx]=1;
+ const dirs=[[1,0],[-1,0],[0,1],[0,-1],[1,1],[-1,-1],[1,-1],[-1,1]];
+ while(q.length){
+   const [x,y]=q.pop();m[y*W+x]=1;
+   for(const [dx,dy] of dirs){
+     const nx=x+dx,ny=y+dy;if(nx<0||ny<0||nx>=W||ny>=H)continue;
+     const ni=ny*W+nx;if(seen[ni]||!ok(nx,ny))continue;
+     seen[ni]=1;q.push([nx,ny]);
+   }
+ }
+ return m;
+}
+function traceMask(m){
+ // Convert mask to a simplified boundary/centerline-like path by sampling connected pixels.
+ // For map lines, use principal continuity: follow the farthest local pixel chain.
+ const pts=[], step=Math.max(1,Math.round(2/scale));
+ for(let y=0;y<H;y+=step)for(let x=0;x<W;x+=step)if(m[y*W+x])pts.push([x,y]);
+ if(pts.length<minSize)return [];
+ // PCA principal axis and ordered projection; this produces a stable polyline for long connected features.
+ let cx=0,cy=0;for(const p of pts){cx+=p[0];cy+=p[1]}cx/=pts.length;cy/=pts.length;
+ let xx=0,xy=0,yy=0;for(const p of pts){const a=p[0]-cx,b=p[1]-cy;xx+=a*a;xy+=a*b;yy+=b*b}
+ const ang=.5*Math.atan2(2*xy,xx-yy), ux=Math.cos(ang),uy=Math.sin(ang);
+ pts.sort((a,b)=>(a[0]*ux+a[1]*uy)-(b[0]*ux+b[1]*uy));
+ const out=[];const stride=Math.max(1,Math.floor(pts.length/250));
+ for(let i=0;i<pts.length;i+=stride){
+   let ax=0,ay=0,n=0;
+   for(let j=i;j<Math.min(pts.length,i+stride);j++){ax+=pts[j][0];ay+=pts[j][1];n++}
+   if(n)out.push([ax/n,ay/n]);
+ }
+ return simplify(out,2);
+}
+function simplify(a,e){
+ if(a.length<3)return a;
+ let max=0,idx=0,A=a[0],B=a[a.length-1];
+ const dx=B[0]-A[0],dy=B[1]-A[1],den=Math.hypot(dx,dy)||1;
+ for(let i=1;i<a.length-1;i++){const d=Math.abs(dy*(a[i][0]-A[0])-dx*(a[i][1]-A[1]))/den;if(d>max){max=d;idx=i}}
+ if(max>e){const l=simplify(a.slice(0,idx+1),e),r=simplify(a.slice(idx),e);return l.slice(0,-1).concat(r)}
+ return [A,B];
+}
+function components(m){
+ const seen=new Uint8Array(W*H), out=[],dirs=[[1,0],[-1,0],[0,1],[0,-1]];
+ for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+  const k=y*W+x;if(!m[k]||seen[k])continue;
+  const q=[k];seen[k]=1;const pix=[];
+  while(q.length){const z=q.pop(),yy=Math.floor(z/W),xx=z%W;pix.push([xx,yy]);
+   for(const [dx,dy] of dirs){const nx=xx+dx,ny=yy+dy;if(nx<0||ny<0||nx>=W||ny>=H)continue;const n=ny*W+nx;if(m[n]&&!seen[n]){seen[n]=1;q.push(n)}}
+  }
+  if(pix.length>=minSize)out.push(pix);
+ }
+ return out;
+}
+function traceFrom(p){
+ const m=maskAround(p,true), comps=components(m);
+ if(!comps.length){msg('No connected line found. Increase tolerance or tap directly on the line.');return}
+ let best=comps[0],bestd=Infinity;
+ for(const c of comps)for(const q of c){
+   const d=Math.hypot(q[0]-p[0],q[1]-p[1]);
+   if(d<bestd){bestd=d;best=c}
+ }
+ const mm=new Uint8Array(W*H);for(const q of best)mm[q[1]*W+q[0]]=1;
+ let segs=traceMask(mm);
+ segs=filterSegments(segs,mm);
+ if(!segs.length){msg('The selected color region is too noisy to trace. Try a cleaner tap or lower tolerance.');return}
+
+ // Score each branch by distance to tap, length, and local continuity.
+ let chosen=null,bestScore=Infinity;
+ for(const ln of segs){
+   let near=Infinity;
+   for(const q of ln)near=Math.min(near,Math.hypot(q[0]-p[0],q[1]-p[1]));
+   const length=ln.reduce((s,q,i)=>i?s+Math.hypot(q[0]-ln[i-1][0],q[1]-ln[i-1][1]):0,0);
+   const score=near - Math.min(30,length*.01);
+   if(score<bestScore){bestScore=score;chosen=ln}
+ }
+ if(!chosen)return;
+ snap();lines.push(chosen);selected.clear();selected.add(lines.length-1);redraw();
+ msg('Branch traced. At intersections, tap the next branch to continue tracing it separately.');
+}
+function traceAll(){
+ if(!picked){msg('Pick a color first.');return}
+ const data=mc.getImageData(0,0,W,H).data,m=new Uint8Array(W*H);
+ for(let y=0;y<H;y++)for(let x=0;x<W;x++){
+   const i=(y*W+x)*4;
+   if(Math.hypot(data[i]-picked[0],data[i+1]-picked[1],data[i+2]-picked[2])<=tol)m[y*W+x]=1
+ }
+ const cs=components(m);snap();let count=0;
+ for(const c of cs){
+   const mm=new Uint8Array(W*H);for(const q of c)mm[q[1]*W+q[0]]=1;
+   let segs=filterSegments(traceMask(mm),mm);
+   for(const ln of segs)if(ln.length>=2){lines.push(ln);count++}
+ }
+ selected.clear();redraw();msg(`Created ${count} cleaned line branches from ${cs.length} matching regions.`);
+}
+
+document.getElementById('pickBtn').onclick=()=>{mode='pick';msg('Tap the map on the line/color you want.');};
+document.getElementById('traceBtn').onclick=()=>{mode='trace';msg('Tap directly on a line to trace its connected component.');};
+document.getElementById('allBtn').onclick=traceAll;
+document.getElementById('selectBtn').onclick=()=>setMode('select');
+document.getElementById('multiBtn').onclick=()=>{multiSelect=!multiSelect;document.getElementById('multiBtn').classList.toggle('active',multiSelect);msg(multiSelect?'Multi-select ON: tap lines to add/remove.':'Multi-select OFF: tap one line.');};
+document.getElementById('editBtn').onclick=()=>{
+ editMode=!editMode; editVertex=-1;
+ document.getElementById('editBtn').classList.toggle('active',editMode);
+ mode=editMode?'edit':'select'; drawPts=[]; redraw();
+ msg(editMode?'Edit mode: tap a vertex and drag it. Tap a line to select it first.':'Vertex editing OFF.');
+};
+document.getElementById('drawBtn').onclick=()=>{if(mode==='draw'&&drawPts.length>1){snap();lines.push(drawPts);drawPts=[];setMode('select');redraw();msg('Manual line added.')}else setMode('draw')};
+document.getElementById('splitBtn').onclick=()=>setMode('split');
+document.getElementById('deleteBtn').onclick=()=>{
+ if(!selected.size)return;
+ snap();lines=lines.filter((_,i)=>!selected.has(i));selected.clear();redraw();msg('Selected lines deleted.');
+};
+document.getElementById('clearBtn').onclick=()=>{if(!lines.length)return;snap();lines=[];selected.clear();redraw();msg('All vector lines cleared.');};
+document.getElementById('undoBtn').onclick=()=>{if(!history.length)return;lines=history.pop();selected.clear();redraw();msg('Undo complete.');};
+document.getElementById('joinBtn').onclick=()=>{
+ if(selected.size!==2){msg('Select exactly two lines, then press Join.');return}
+ const a=[...selected], A=lines[a[0]],B=lines[a[1]];
+ const combos=[[A[0],B[0],false,false],[A[0],B[B.length-1],false,true],[A[A.length-1],B[0],true,false],[A[A.length-1],B[B.length-1],true,true]];
+ combos.sort((x,y)=>Math.hypot(x[0][0]-x[1][0],x[0][1]-x[1][1])-Math.hypot(y[0][0]-y[1][0],y[0][1]-y[1][1]));
+ const c=combos[0],d=Math.hypot(c[0][0]-c[1][0],c[0][1]-c[1][1]);
+ if(d>60){msg('Endpoints are too far apart to join.');return}
+ let p=c[2]?A.slice().reverse():A.slice(),q=c[3]?B.slice().reverse():B.slice();
+ snap();lines=lines.filter((_,i)=>i!==a[0]&&i!==a[1]);lines.push(p.concat(q));selected.clear();selected.add(lines.length-1);redraw();msg('Lines joined.');
+};
+
+function nearestLine(p){
+ let bi=-1,bd=Infinity,bs=-1;
+ lines.forEach((ln,i)=>{for(let j=1;j<ln.length;j++){
+  const a=ln[j-1],b=ln[j],dx=b[0]-a[0],dy=b[1]-a[1],den=dx*dx+dy*dy||1;
+  let t=((p[0]-a[0])*dx+(p[1]-a[1])*dy)/den;t=Math.max(0,Math.min(1,t));
+  const q=[a[0]+t*dx,a[1]+t*dy],d=Math.hypot(p[0]-q[0],p[1]-q[1]);
+  if(d<bd){bd=d;bi=i;bs=j}
+ }});
+ return {i:bi,d:bd,s:bs};
+}
+stage.addEventListener('pointerdown',e=>{
+ const p=screenToImage(e.clientX,e.clientY);
+ if(mode==='edit'){
+   const v=nearestVertex(p);
+   if(v.i>=0 && v.d<25){selected.clear();selected.add(v.i);editVertex=v.v;redraw();msg('Vertex selected. Drag to reposition it.');}
+   return;
+ }
+ if(mode==='pick'){picked=pixel(p[0],p[1]);mode='select';msg(`Color picked: RGB ${picked.join(', ')}. Now Trace From Tap.`);redraw();return}
+ if(mode==='trace'){traceFrom(p);return}
+ if(geoMode){addControlPoint(p);return}
+ if(mode==='draw'){drawPts.push(p);redraw();return}
+ const hit=nearestLine(p);
+ if(mode==='split'){
+   if(hit.i<0||hit.d>25){msg('Tap close to the line you want to split.');return}
+   selected.clear();selected.add(hit.i);const ln=lines[hit.i],s=hit.s;
+   const a=ln.slice(0,s),b=ln.slice(s);b.unshift(p);
+   if(a.length<2||b.length<2){msg('Cannot split here.');return}
+   snap();lines.splice(hit.i,1,a,b);selected.clear();selected.add(hit.i);selected.add(hit.i+1);setMode('select');redraw();return;
+ }
+ if(hit.i>=0&&hit.d<25){
+   if(multiSelect || e.shiftKey) {selected.has(hit.i)?selected.delete(hit.i):selected.add(hit.i)}
+   else {selected.clear();selected.add(hit.i)}
+   redraw();msg(`${selected.size} line${selected.size===1?'':'s'} selected.`);
+ }
+});
+let editDragging=false;
+stage.addEventListener('pointermove',e=>{
+ if(mode==='edit' && editVertex>=0 && e.buttons){
+   const p=screenToImage(e.clientX,e.clientY), idx=[...selected][0];
+   if(idx!==undefined && lines[idx] && lines[idx][editVertex]){
+     lines[idx][editVertex]=p; redraw();
+   }
+   editDragging=true; return;
+ }
+
+ if(e.pointerType==='mouse' && e.buttons===1 && mode==='pan'){ox+=e.movementX;oy+=e.movementY;applyTransform()}
+});
+stage.addEventListener('pointerup',e=>{
+ if(mode==='edit' && editDragging){snap();editDragging=false;editVertex=-1;msg('Vertex moved.');}
+});
+let lastDist=0,lastMid=null;
+stage.addEventListener('touchstart',e=>{
+ if(e.touches.length===2){lastDist=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);lastMid=[(e.touches[0].clientX+e.touches[1].clientX)/2,(e.touches[0].clientY+e.touches[1].clientY)/2]}
+},{passive:false});
+stage.addEventListener('touchmove',e=>{
+ if(e.touches.length!==2)return;e.preventDefault();
+ const d=Math.hypot(e.touches[0].clientX-e.touches[1].clientX,e.touches[0].clientY-e.touches[1].clientY);
+ const mid=[(e.touches[0].clientX+e.touches[1].clientX)/2,(e.touches[0].clientY+e.touches[1].clientY)/2];
+ const factor=d/lastDist, before=screenToImage(lastMid[0],lastMid[1]);
+ scale=Math.max(.15,Math.min(12,scale*factor));
+ ox=mid[0]-stage.getBoundingClientRect().left-before[0]*scale;
+ oy=mid[1]-stage.getBoundingClientRect().top-before[1]*scale;
+ lastDist=d;lastMid=mid;applyTransform();
+},{passive:false});
+stage.addEventListener('wheel',e=>{
+ e.preventDefault();const p=screenToImage(e.clientX,e.clientY),f=e.deltaY<0?1.12:.89;
+ scale=Math.max(.15,Math.min(12,scale*f));ox=e.clientX-stage.getBoundingClientRect().left-p[0]*scale;oy=e.clientY-stage.getBoundingClientRect().top-p[1]*scale;applyTransform();
+},{passive:false});
+
+function addControlPoint(p){
+ const xy=prompt('Enter real X,Y separated by comma (example: 13.4050,52.5200):');
+ if(!xy)return;const a=xy.split(',').map(Number);
+ if(a.length!==2||a.some(isNaN)){msg('Invalid X,Y.');return}
+ cps.push({px:p[0],py:p[1],x:a[0],y:a[1]});updateCp();geoMode=false;msg('Control point added. Add at least 3 points for affine georeferencing.');
+}
+function updateCp(){document.getElementById('cpList').innerHTML=cps.map((c,i)=>`<div class="small">#${i+1}: image (${c.px.toFixed(1)}, ${c.py.toFixed(1)}) → (${c.x}, ${c.y})</div>`).join('')}
+document.getElementById('geoBtn').onclick=()=>{document.getElementById('geoPanel').style.display='block';msg('Georeferencing is optional.');};
+document.getElementById('closeGeo').onclick=()=>document.getElementById('geoPanel').style.display='none';
+document.getElementById('addCp').onclick=()=>{geoMode=true;msg('Tap a known control point on the map.');};
+document.getElementById('clearCp').onclick=()=>{cps=[];updateCp();};
+
+function affine(){
+ if(cps.length<3)throw Error('At least 3 control points are required.');
+ function fit(key){
+  const M=[[0,0,0,0],[0,0,0,0],[0,0,0,0]];
+  for(const c of cps){const v=[c.px,c.py,1],z=c[key];for(let i=0;i<3;i++){M[i][3]+=v[i]*z;for(let j=0;j<3;j++)M[i][j]+=v[i]*v[j];}}
+  for(let i=0;i<3;i++){let k=i;for(let j=i+1;j<3;j++)if(Math.abs(M[j][i])>Math.abs(M[k][i]))k=j;[M[i],M[k]]=[M[k],M[i]];if(Math.abs(M[i][i])<1e-12)throw Error('Control points are collinear or too close together.');for(let j=i+1;j<3;j++){let q=M[j][i]/M[i][i];for(let z=i;z<4;z++)M[j][z]-=q*M[i][z];}}
+  const r=[0,0,0];for(let i=2;i>=0;i--){r[i]=(M[i][3]-(i<2?M[i][i+1]*r[i+1]:0)-(i===0?M[i][1]*r[1]:0))/M[i][i];}return r;
+ }
+ return {x:fit('x'),y:fit('y')};
+}
+function geoLine(ln,t){
+ return ln.map(p=>[t.x[0]*p[0]+t.x[1]*p[1]+t.x[2],t.y[0]*p[0]+t.y[1]*p[1]+t.y[2]]);
+}
+function crsWkt(){
+ const c=document.getElementById('crs').value;
+ if(c==='4326')return 'GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]]';
+ if(c==='3857')return 'PROJCS["WGS 84 / Pseudo-Mercator",GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]],PROJECTION["Mercator_1SP"],PARAMETER["central_meridian",0],PARAMETER["scale_factor",1],PARAMETER["false_easting",0],PARAMETER["false_northing",0],UNIT["metre",1]]';
+ if(c==='utm_auto'){const z=Math.max(1,Math.min(60,Number(document.getElementById('utmZone').value)||36));const south=document.getElementById('utmHem').value==='S';return `PROJCS["WGS 84 / UTM zone ${z}${south?'S':'N'}",GEOGCS["WGS 84",DATUM["WGS_1984",SPHEROID["WGS 84",6378137,298.257223563]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433]],PROJECTION["Transverse_Mercator"],PARAMETER["latitude_of_origin",0],PARAMETER["central_meridian",${z*6-183}],PARAMETER["scale_factor",0.9996],PARAMETER["false_easting",500000],PARAMETER["false_northing",${south?10000000:0}],UNIT["metre",1]]`;}
+ const w=document.getElementById('customWkt').value.trim();if(!w)throw Error('Enter custom ESRI WKT.');return w;
+}
+document.getElementById('crs').onchange=()=>{const c=document.getElementById('crs').value;document.getElementById('utmRow').style.display=c==='utm_auto'?'flex':'none';document.getElementById('customRow').style.display=c==='custom'?'block':'none';};
+document.getElementById('exportBtn').onclick=()=>{
+ if(!lines.length){msg('No vector lines to export.');return}
+ try{let out=lines,name='map_vectors',prj=null;if(cps.length>=3){const t=affine();out=lines.map(l=>geoLine(l,t));name='map_vectors_georeferenced';prj=crsWkt();}
+ const features=out.map((l,i)=>({type:'Feature',properties:{id:i+1},geometry:{type:'LineString',coordinates:l}}));
+ const opts={folder:name,types:{line:name},filename:name};if(prj)opts.prj=prj;
+ const result=shpwrite.zip({type:'FeatureCollection',features},opts);const blob=result instanceof Blob?result:new Blob([result],{type:'application/zip'});const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name+'.zip';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000);msg(prj?'Georeferenced Shapefile exported with .prj.':'Pixel-coordinate Shapefile exported.');
+ }catch(e){msg('Export error: '+e.message)}};
+
+
+document.getElementById('loadProjectBtn').onclick=()=>document.getElementById('projectFile').click();
+document.getElementById('projectFile').onchange=e=>{
+ const f=e.target.files[0];if(!f)return;
+ const r=new FileReader();
+ r.onload=()=>{
+   try{
+     const p=JSON.parse(r.result);
+     if(!Array.isArray(p.lines))throw Error('Invalid project file.');
+     lines=p.lines;cps=Array.isArray(p.cps)?p.cps:[];picked=p.picked||null;
+     tol=p.tol||45;minSize=p.minSize||35;continuity=p.continuity||6;
+     if(p.crs)document.getElementById('crs').value=p.crs;
+     if(p.utmZone)document.getElementById('utmZone').value=p.utmZone;
+     if(p.utmHem)document.getElementById('utmHem').value=p.utmHem;
+     if(p.customWkt)document.getElementById('customWkt').value=p.customWkt;
+     document.getElementById('tolRange').value=tol;document.getElementById('tolVal').textContent=tol;
+     document.getElementById('minRange').value=minSize;document.getElementById('minVal').textContent=minSize;
+     document.getElementById('contRange').value=continuity;document.getElementById('contVal').textContent=continuity;
+     updateCp();redraw();msg('Project loaded. Load the matching map image to view it with these vectors.');
+   }catch(err){msg('Project load error: '+err.message)}
+ };
+ r.readAsText(f);
+};
+
+document.getElementById('projectBtn').onclick=()=>{
+ const project={version:5,lines,cps,epsg:document.getElementById('epsg').value||'',picked,tol,minSize};
+ const blob=new Blob([JSON.stringify(project)],{type:'application/json'}),a=document.createElement('a');
+ a.href=URL.createObjectURL(blob);a.download='map_vectorizer_project.json';a.click();
+};
+
+document.getElementById('tolRange').oninput=e=>{tol=Number(e.target.value);document.getElementById('tolVal').textContent=tol};
+document.getElementById('minRange').oninput=e=>{minSize=Number(e.target.value);document.getElementById('minVal').textContent=minSize};
+document.getElementById('contRange').oninput=e=>{continuity=Number(e.target.value);document.getElementById('contVal').textContent=continuity};
+
+window.addEventListener('resize',()=>{if(img)fit()});
+</script>
+<script>
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(()=>{}));
+}
+let deferredInstall = null;
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault(); deferredInstall=e;
+  const b=document.getElementById('installBar'); if(b)b.style.display='block';
+});
+document.getElementById('installBtn')?.addEventListener('click', async()=>{
+  if(!deferredInstall){
+    alert('On iPhone: tap Share in Safari, then choose “Add to Home Screen”.');
+    return;
+  }
+  deferredInstall.prompt();
+  deferredInstall=null;
+});
+</script>
+</body>
+</html>

@@ -1,0 +1,11 @@
+{
+  "name": "Map Vectorizer",
+  "short_name": "Map Vectorizer",
+  "start_url": "./index.html",
+  "display": "standalone",
+  "background_color": "#111827",
+  "theme_color": "#111827",
+  "orientation": "any",
+  "description": "Trace polylines from scanned maps and export GIS vector data.",
+  "icons": []
+}
