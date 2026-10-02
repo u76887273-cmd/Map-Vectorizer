@@ -8,7 +8,7 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <meta name="apple-mobile-web-app-title" content="Map Vectorizer">
 <link rel="manifest" href="manifest.webmanifest">
-<title>Map Vectorizer V5</title>
+<title>Map Vectorizer V2</title>
 <style>
 *{box-sizing:border-box}
 body{margin:0;background:#111827;color:#f9fafb;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
@@ -21,6 +21,7 @@ button.active{background:#2563eb;border-color:#60a5fa}
 button.danger{background:#7f1d1d}
 button:disabled{opacity:.45}
 input[type=number],input[type=text]{width:100px}
+#pickedSwatch{display:inline-block;width:22px;height:22px;border-radius:6px;border:1px solid #94a3b8;vertical-align:middle;margin-left:6px}
 #stage{position:absolute;left:0;right:0;top:102px;bottom:0;overflow:hidden;background:#030712;touch-action:none}
 canvas{position:absolute;left:0;top:0;transform-origin:0 0}
 #info{position:fixed;z-index:8;left:8px;right:8px;bottom:8px;background:rgba(17,24,39,.9);border:1px solid #374151;border-radius:10px;padding:8px;font-size:12px}
@@ -62,8 +63,9 @@ canvas{position:absolute;left:0;top:0;transform-origin:0 0}
 </div>
 
 <div id="info">Load a map image. Pick a line color, then Trace From Tap.</div>
-<div id="traceSettings" class="panel" style="display:block;top:auto;bottom:48px;left:8px;right:auto;width:min(360px,calc(100% - 16px));max-height:none">
-<div class="row"><label>Color tolerance</label><input id="tolRange" type="range" min="10" max="110" value="45"><span id="tolVal">45</span></div>
+<div id="traceSettings" class="panel" style="display:block;top:auto;bottom:48px;left:8px;right:auto;width:min(390px,calc(100% - 16px));max-height:none">
+<div class="row"><label>Color tolerance</label><input id="tolRange" type="range" min="5" max="110" value="35"><span id="tolVal">35</span></div>
+<div class="row"><label>Picked color</label><span id="pickedSwatch"></span><span id="pickedVal" class="small">none</span></div>
 <div class="row"><label>Minimum component</label><input id="minRange" type="range" min="5" max="500" value="35"><span id="minVal">35</span></div>
 <div class="row"><label>Line continuity</label><input id="contRange" type="range" min="1" max="20" value="6"><span id="contVal">6</span></div>
 </div>
@@ -79,7 +81,7 @@ canvas{position:absolute;left:0;top:0;transform-origin:0 0}
 <div class="row"><button id="closeGeo">Close</button></div>
 </div>
 
-<script src="https://cdn.jsdelivr.net/npm/shp-write@0.3.2/shpwrite.js"></script>
+<script src="shpwrite_local.js"></script>
 <script>
 const file=document.getElementById('file'), stage=document.getElementById('stage');
 const map=document.getElementById('map'), vec=document.getElementById('vec');
@@ -88,7 +90,7 @@ const statusEl=document.getElementById('status'), info=document.getElementById('
 
 let img=null, W=0,H=0;
 let lines=[], history=[], selected=new Set(), mode='select';
-let picked=null, tol=45, minSize=35, continuity=6;
+let picked=null, tol=35, minSize=35, continuity=6;
 let scale=1, ox=0, oy=0, dragging=false, lastX=0,lastY=0;
 let drawPts=[], splitLine=-1, cps=[], geoMode=false, multiSelect=false, editMode=false, editVertex=-1, traceVisited=new Set();
 
@@ -154,47 +156,112 @@ file.onchange=e=>{
 };
 
 
-function localColorScore(x,y,target){
- const r=Math.max(0,Math.min(W-1,Math.round(x))), c=Math.max(0,Math.min(H-1,Math.round(y)));
- const d=mc.getImageData(r,c,1,1).data;
- return Math.hypot(d[0]-target[0],d[1]-target[1],d[2]-target[2]);
-}
-function localWidth(m,x,y){
- // Estimate local line thickness from a small cross neighborhood.
- let n=0;
- for(let dy=-4;dy<=4;dy++)for(let dx=-4;dx<=4;dx++){
-   const xx=Math.round(x)+dx,yy=Math.round(y)+dy;
-   if(xx>=0&&yy>=0&&xx<W&&yy<H&&m[yy*W+xx])n++;
+function rgbToHsv(r,g,b){r/=255;g/=255;b/=255;const mx=Math.max(r,g,b),mn=Math.min(r,g,b),d=mx-mn;let h=0;if(d){if(mx===r)h=((g-b)/d)%6;else if(mx===g)h=(b-r)/d+2;else h=(r-g)/d+4;h*=60;if(h<0)h+=360}const sv=mx?d/mx:0;return [h,sv*100,mx*100]}
+function hueDiff(a,b){let d=Math.abs(a-b);return d>180?360-d:d}
+function sampleColor(x,y){
+ const cx=Math.round(x),cy=Math.round(y), vals=[];
+ for(let dy=-1;dy<=1;dy++)for(let dx=-1;dx<=1;dx++){
+   const xx=Math.max(0,Math.min(W-1,cx+dx)),yy=Math.max(0,Math.min(H-1,cy+dy));
+   const d=mc.getImageData(xx,yy,1,1).data; vals.push([d[0],d[1],d[2]])
  }
- return Math.sqrt(n);
+ vals.sort((a,b)=>{const sa=a[0]+a[1]+a[2],sb=b[0]+b[1]+b[2];return sa-sb});
+ return vals[Math.floor(vals.length/2)]
 }
-function segmentContinuity(m,a,b){
- const len=Math.hypot(b[0]-a[0],b[1]-a[1])||1;
- const steps=Math.max(4,Math.ceil(len/continuity));
- let good=0;
- for(let i=0;i<=steps;i++){
-   const t=i/steps,x=Math.round(a[0]+(b[0]-a[0])*t),y=Math.round(a[1]+(b[1]-a[1])*t);
-   if(x>=0&&y>=0&&x<W&&y<H&&m[y*W+x])good++;
+function colorMatch(rgb,target,targetHsv){
+ const d=Math.hypot(rgb[0]-target[0],rgb[1]-target[1],rgb[2]-target[2]);
+ if(d>tol)return false;
+ const hsv=rgbToHsv(rgb[0],rgb[1],rgb[2]);
+ // When the selected color is saturated, use hue as a guardrail. This prevents
+ // a blue road from expanding into a yellow map background even at high tolerance.
+ if(targetHsv[1]>=28){
+   const hd=hueDiff(hsv[0],targetHsv[0]);
+   const hueTol=Math.max(10,Math.min(32,8+tol*.18));
+   if(hd>hueTol)return false;
+   if(hsv[1]<Math.max(12,targetHsv[1]*.18))return false;
  }
- return good/(steps+1);
+ return true;
+}
+function pixel(x,y){const d=mc.getImageData(Math.max(0,Math.min(W-1,Math.round(x))),Math.max(0,Math.min(H-1,Math.round(y))),1,1).data;return[d[0],d[1],d[2]]}
+function dist(a,b){return Math.hypot(a[0]-b[0],a[1]-b[1],a[2]-b[2])}
+function maskAround(seed){
+ const data=mc.getImageData(0,0,W,H).data,m=new Uint8Array(W*H),q=[],seen=new Uint8Array(W*H);
+ const sx=Math.round(seed[0]),sy=Math.round(seed[1]);
+ if(sx<0||sy<0||sx>=W||sy>=H)return m;
+ const target=sampleColor(sx,sy),targetHsv=rgbToHsv(...target);
+ picked=target;
+ const dirs=[[1,0],[-1,0],[0,1],[0,-1],[1,1],[-1,-1],[1,-1],[-1,1]];
+ const ok=(x,y)=>{const i=(y*W+x)*4;return colorMatch([data[i],data[i+1],data[i+2]],target,targetHsv)};
+ if(!ok(sx,sy))return m;
+ q.push([sx,sy]);seen[sy*W+sx]=1;
+ while(q.length){const [x,y]=q.pop();m[y*W+x]=1;for(const [dx,dy] of dirs){const nx=x+dx,ny=y+dy;if(nx<0||ny<0||nx>=W||ny>=H)continue;const ni=ny*W+nx;if(!seen[ni]&&ok(nx,ny)){seen[ni]=1;q.push([nx,ny])}}}
+ updatePickedUI();return m;
+}
+function updatePickedUI(){
+ const sw=document.getElementById('pickedSwatch'),pv=document.getElementById('pickedVal');
+ if(picked){sw.style.background=`rgb(${picked[0]},${picked[1]},${picked[2]})`;pv.textContent=`RGB ${picked.join(', ')}`}
+ else {sw.style.background='transparent';pv.textContent='none'}
+}
+function componentFromMask(m,seed){
+ const sx=Math.round(seed[0]),sy=Math.round(seed[1]),idx=sy*W+sx;if(!m[idx])return [];
+ const seen=new Uint8Array(W*H),q=[idx],out=[];seen[idx]=1;const dirs=[[1,0],[-1,0],[0,1],[0,-1],[1,1],[-1,-1],[1,-1],[-1,1]];
+ while(q.length){const z=q.pop(),y=Math.floor(z/W),x=z%W;out.push([x,y]);for(const [dx,dy] of dirs){const nx=x+dx,ny=y+dy;if(nx<0||ny<0||nx>=W||ny>=H)continue;const n=ny*W+nx;if(m[n]&&!seen[n]){seen[n]=1;q.push(n)}}}
+ return out;
+}
+function skeletonizeComponent(pix){
+ if(pix.length<minSize)return {skel:new Uint8Array(0),x0:0,y0:0,w:0,h:0};
+ let x0=W,y0=H,x1=0,y1=0;for(const [x,y] of pix){x0=Math.min(x0,x);y0=Math.min(y0,y);x1=Math.max(x1,x);y1=Math.max(y1,y)}
+ x0=Math.max(0,x0-1);y0=Math.max(0,y0-1);x1=Math.min(W-1,x1+1);y1=Math.min(H-1,y1+1);const w=x1-x0+1,h=y1-y0+1,m=new Uint8Array(w*h);
+ for(const [x,y] of pix)m[(y-y0)*w+(x-x0)]=1;
+ let changed=true,iter=0;
+ const nb=(x,y)=>[m[(y-1)*w+x],m[(y-1)*w+x+1],m[y*w+x+1],m[(y+1)*w+x+1],m[(y+1)*w+x],m[(y+1)*w+x-1],m[y*w+x-1],m[(y-1)*w+x-1]];
+ while(changed&&iter++<80){changed=false;let del=[];
+   for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++)if(m[y*w+x]){const n=nb(x,y),B=n.reduce((a,v)=>a+v,0);let A=0;for(let k=0;k<8;k++)if(!n[k]&&n[(k+1)%8])A++;if(B>=2&&B<=6&&A===1&&n[0]*n[2]*n[4]===0&&n[2]*n[4]*n[6]===0)del.push(y*w+x)}
+   if(del.length){changed=true;for(const k of del)m[k]=0} del=[];
+   for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++)if(m[y*w+x]){const n=nb(x,y),B=n.reduce((a,v)=>a+v,0);let A=0;for(let k=0;k<8;k++)if(!n[k]&&n[(k+1)%8])A++;if(B>=2&&B<=6&&A===1&&n[0]*n[2]*n[6]===0&&n[0]*n[4]*n[6]===0)del.push(y*w+x)}
+   if(del.length){changed=true;for(const k of del)m[k]=0}
+ }
+ return {skel:m,x0,y0,w,h};
+}
+function skeletonBranches(sk){
+ const {skel,x0,y0,w,h}=sk,idx=(x,y)=>y*w+x,dirs=[[1,0],[-1,0],[0,1],[0,-1],[1,1],[-1,-1],[1,-1],[-1,1]];
+ const degree=new Uint8Array(w*h),nodes=[];
+ for(let y=1;y<h-1;y++)for(let x=1;x<w-1;x++)if(skel[idx(x,y)]){let d=0;for(const [dx,dy] of dirs)if(skel[idx(x+dx,y+dy)])d++;degree[idx(x,y)]=d;if(d!==2)nodes.push([x,y])}
+ const edgeSeen=new Set(),key=(a,b)=>a<b?`${a},${b}`:`${b},${a}`;const branches=[];
+ function walk(start,next){let path=[[start[0]+x0,start[1]+y0]],prev=start,cur=next;edgeSeen.add(key(idx(prev[0],prev[1]),idx(cur[0],cur[1])));path.push([cur[0]+x0,cur[1]+y0]);let guard=0;
+   while(guard++<w*h){if(degree[idx(cur[0],cur[1])]!==2)break;let ns=[];for(const [dx,dy] of dirs){const nx=cur[0]+dx,ny=cur[1]+dy;if(nx>=0&&ny>=0&&nx<w&&ny<h&&skel[idx(nx,ny)]&&!(nx===prev[0]&&ny===prev[1]))ns.push([nx,ny]);}if(!ns.length)break;const n=ns[0];if(edgeSeen.has(key(idx(cur[0],cur[1]),idx(n[0],n[1]))))break;edgeSeen.add(key(idx(cur[0],cur[1]),idx(n[0],n[1])));prev=cur;cur=n;path.push([cur[0]+x0,cur[1]+y0]);}
+   return path;
+ }
+ for(const n of nodes){for(const [dx,dy] of dirs){const nx=n[0]+dx,ny=n[1]+dy;if(nx<0||ny<0||nx>=w||ny>=h||!skel[idx(nx,ny)])continue;if(!edgeSeen.has(key(idx(n[0],n[1]),idx(nx,ny)))){const p=walk(n,[nx,ny]);if(p.length>=3)branches.push(simplify(p,1.5))}}}
+ // Closed loops have no degree != 2 nodes. Pick a deterministic loop path.
+ if(!branches.length){let start=null;for(let y=1;y<h-1&&!start;y++)for(let x=1;x<w-1;x++)if(skel[idx(x,y)]){start=[x,y];break}if(start){let nbs=[];for(const [dx,dy] of dirs){const nx=start[0]+dx,ny=start[1]+dy;if(skel[idx(nx,ny)])nbs.push([nx,ny])}if(nbs.length){const p=walk(start,nbs[0]);if(p.length>=3)branches.push(simplify(p,1.5))}}}
+ return branches;
+}
+function traceMask(m,seed){
+ const pix=componentFromMask(m,seed);if(pix.length<minSize)return [];
+ const sk=skeletonizeComponent(pix), branches=skeletonBranches(sk);
+ return branches.filter(l=>l.length>=3);
 }
 function filterSegments(segs,m){
- if(!segs.length)return [];
- const widths=segs.map(l=>l.reduce((s,p,i)=>i?s+localWidth(m,p[0],p[1]):s,0)/Math.max(1,l.length-1));
- const med=[...widths].sort((a,b)=>a-b)[Math.floor(widths.length/2)]||1;
- return segs.filter((l,i)=>{
-   if(l.length<3)return false;
-   if(l.length>2){
-     const step=Math.max(1,Math.floor(l.length/12));
-     let sum=0,n=0;
-     for(let j=step;j<l.length;j+=step){sum+=segmentContinuity(m,l[j-step],l[j]);n++}
-     if(n&&sum/n<0.55)return false;
-   }
-   // Reject tiny, unusually thin fragments while retaining genuine thin roads.
-   if(widths[i]<Math.max(0.65,med*0.25) && l.length<12)return false;
-   return true;
- });
+ return segs.filter(l=>{if(l.length<3)return false;let len=0;for(let i=1;i<l.length;i++)len+=Math.hypot(l[i][0]-l[i-1][0],l[i][1]-l[i-1][1]);return len>=Math.max(8,Math.sqrt(minSize)*2)})
 }
+function traceFrom(p){
+ const m=maskAround(p),count=m.reduce((a,v)=>a+v,0);
+ if(!count){msg('No matching line at this tap. Tap directly on the colored line.');return}
+ const segs=filterSegments(traceMask(m,p),m);
+ if(!segs.length){msg('I found the color but could not form a centerline. Tap closer to the middle of the line or lower tolerance.');return}
+ let chosen=null,best=Infinity;
+ for(const ln of segs){let near=Infinity;for(const q of ln)near=Math.min(near,Math.hypot(q[0]-p[0],q[1]-p[1]));const length=ln.reduce((s,q,i)=>i?s+Math.hypot(q[0]-ln[i-1][0],q[1]-ln[i-1][1]):0,0);const score=near-Math.min(50,length*.03);if(score<best){best=score;chosen=ln}}
+ if(!chosen)return;snap();lines.push(chosen);selected.clear();selected.add(lines.length-1);redraw();msg(`Centerline traced (${chosen.length} points).`);
+}
+function traceAll(){
+ if(!picked){msg('Pick a line color first.');return}
+ const m=new Uint8Array(W*H),data=mc.getImageData(0,0,W,H).data,target=picked,targetHsv=rgbToHsv(...target);
+ for(let y=0;y<H;y++)for(let x=0;x<W;x++){const i=(y*W+x)*4;if(colorMatch([data[i],data[i+1],data[i+2]],target,targetHsv))m[y*W+x]=1}
+ const cs=components(m);snap();let count=0;
+ for(const c of cs){if(c.length<minSize)continue;const seed=c[Math.floor(c.length/2)],mm=new Uint8Array(W*H);for(const q of c)mm[q[1]*W+q[0]]=1;for(const ln of filterSegments(traceMask(mm,seed),mm)){if(ln.length>=3){lines.push(ln);count++}}}
+ selected.clear();redraw();msg(`Created ${count} centerline branches from ${cs.length} color regions.`);
+}
+
 function nearestVertex(p){
  let bi=-1,bv=-1,bd=Infinity;
  lines.forEach((ln,i)=>ln.forEach((q,j)=>{
@@ -308,7 +375,7 @@ function traceAll(){
  selected.clear();redraw();msg(`Created ${count} cleaned line branches from ${cs.length} matching regions.`);
 }
 
-document.getElementById('pickBtn').onclick=()=>{mode='pick';msg('Tap the map on the line/color you want.');};
+document.getElementById('pickBtn').onclick=()=>{mode='pick';msg('Tap directly on the line. The app will remember its color and hue.');};
 document.getElementById('traceBtn').onclick=()=>{mode='trace';msg('Tap directly on a line to trace its connected component.');};
 document.getElementById('allBtn').onclick=traceAll;
 document.getElementById('selectBtn').onclick=()=>setMode('select');
@@ -355,7 +422,7 @@ stage.addEventListener('pointerdown',e=>{
    if(v.i>=0 && v.d<25){selected.clear();selected.add(v.i);editVertex=v.v;redraw();msg('Vertex selected. Drag to reposition it.');}
    return;
  }
- if(mode==='pick'){picked=pixel(p[0],p[1]);mode='select';msg(`Color picked: RGB ${picked.join(', ')}. Now Trace From Tap.`);redraw();return}
+ if(mode==='pick'){picked=sampleColor(p[0],p[1]);updatePickedUI();mode='select';msg(`Color picked: RGB ${picked.join(', ')}. Now tap Trace From Tap, then tap the line.`);redraw();return}
  if(mode==='trace'){traceFrom(p);return}
  if(geoMode){addControlPoint(p);return}
  if(mode==='draw'){drawPts.push(p);redraw();return}
@@ -458,7 +525,7 @@ document.getElementById('projectFile').onchange=e=>{
      const p=JSON.parse(r.result);
      if(!Array.isArray(p.lines))throw Error('Invalid project file.');
      lines=p.lines;cps=Array.isArray(p.cps)?p.cps:[];picked=p.picked||null;
-     tol=p.tol||45;minSize=p.minSize||35;continuity=p.continuity||6;
+     tol=p.tol||35;minSize=p.minSize||35;continuity=p.continuity||6;
      if(p.crs)document.getElementById('crs').value=p.crs;
      if(p.utmZone)document.getElementById('utmZone').value=p.utmZone;
      if(p.utmHem)document.getElementById('utmHem').value=p.utmHem;
@@ -473,7 +540,7 @@ document.getElementById('projectFile').onchange=e=>{
 };
 
 document.getElementById('projectBtn').onclick=()=>{
- const project={version:5,lines,cps,epsg:document.getElementById('epsg').value||'',picked,tol,minSize};
+ const project={version:6,lines,cps,picked,tol,minSize,continuity,crs:document.getElementById('crs').value,utmZone:document.getElementById('utmZone').value,utmHem:document.getElementById('utmHem').value,customWkt:document.getElementById('customWkt').value};
  const blob=new Blob([JSON.stringify(project)],{type:'application/json'}),a=document.createElement('a');
  a.href=URL.createObjectURL(blob);a.download='map_vectorizer_project.json';a.click();
 };
